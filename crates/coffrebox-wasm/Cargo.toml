@@ -1,0 +1,40 @@
+[package]
+name = "coffrebox-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "WebAssembly bindings (wasm-bindgen) over coffrebox-core for the browser and Node.js"
+
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["app", "people"]
+# npm SDK surface: application token, challenge and snapshot.
+app = []
+# Web vault surface: account, vaults, items, members and rotation.
+people = []
+
+[dependencies]
+coffrebox-core = { path = "../coffrebox-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+wasm-bindgen = { workspace = true }
+zeroize = { workspace = true }
+
+[[test]]
+name = "trust_anchor"
+required-features = ["people"]
+
+[[test]]
+name = "anti_rollback"
+required-features = ["people"]
+
+[[test]]
+name = "members_and_rotation"
+required-features = ["people"]

@@ -1,0 +1,30 @@
+[package]
+name = "coffrebox"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+authors = ["Bruno Santos"]
+license = "MIT"
+description = "Zero-knowledge secrets for Rust apps: read your Coffrebox vault, with an encrypted offline cache."
+repository = "https://github.com/brunosps/coffrebox-sdk"
+homepage = "https://github.com/brunosps/coffrebox-sdk"
+documentation = "https://docs.rs/coffrebox"
+readme = "README.md"
+keywords = ["secrets", "vault", "zero-knowledge", "config", "env"]
+categories = ["cryptography", "config", "api-bindings"]
+
+[dependencies]
+coffrebox-core = { path = "../coffrebox-core", version = "0.1.0" }
+hex = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }

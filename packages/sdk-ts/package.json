@@ -1,0 +1,67 @@
+{
+  "name": "@brunosps00/coffrebox",
+  "version": "0.1.0",
+  "description": "Zero-knowledge secrets for Node.js apps: load your Coffrebox vault into process.env, with an encrypted offline cache.",
+  "license": "MIT",
+  "author": "Bruno Santos",
+  "homepage": "https://github.com/brunosps/coffrebox-sdk/tree/main/packages/sdk-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/brunosps/coffrebox-sdk.git",
+    "directory": "packages/sdk-ts"
+  },
+  "bugs": {
+    "url": "https://github.com/brunosps/coffrebox-sdk/issues"
+  },
+  "keywords": [
+    "coffrebox",
+    "secrets",
+    "secret-management",
+    "vault",
+    "zero-knowledge",
+    "end-to-end-encryption",
+    "env",
+    "dotenv",
+    "configuration"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "wasm/package.json",
+    "wasm/coffrebox_wasm.js",
+    "wasm/coffrebox_wasm.d.ts",
+    "wasm/coffrebox_wasm_bg.wasm",
+    "CHANGELOG.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build:wasm": "wasm-pack build ../../crates/coffrebox-wasm --release --target nodejs --out-dir ../../packages/sdk-ts/wasm --no-pack -- --no-default-features --features app && node scripts/clean-wasm.mjs",
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build:wasm && npm run typecheck && npm run build && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.0",
+    "vitest": "^5.1.0"
+  }
+}
