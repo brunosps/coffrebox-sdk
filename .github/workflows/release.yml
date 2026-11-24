@@ -6,6 +6,8 @@ name: Release CLI
 #
 # Supply chain: every action is pinned to a full commit SHA and the Rust toolchain to a fixed
 # version; a release that already has assets is never overwritten (publish a new tag instead).
+# The release is created as a draft, filled and only then published, so it works with immutable
+# releases turned on in the repository.
 on:
   workflow_dispatch:
     inputs:
@@ -111,9 +113,11 @@ jobs:
       - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/coffre-*
-      - name: Create the release and upload
+      # Rascunho primeiro: com as releases imutáveis ligadas, nada se anexa depois de publicar.
+      - name: Create the release, upload and publish
         run: |
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
-            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
-              --notes "coffre CLI $TAG. Check your download against SHA256SUMS, or run: gh attestation verify <file> -R $GITHUB_REPOSITORY. Guide: https://coffrebox.net/docs/en/cli"
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --verify-tag --title "$TAG" \
+              --notes "coffre CLI $TAG. Check your download against SHA256SUMS, or run: gh attestation verify <file> -R $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml. Guide: https://coffrebox.net/docs/en/cli"
           gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY"
+          gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest
