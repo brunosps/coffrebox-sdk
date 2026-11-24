@@ -142,6 +142,29 @@ impl Spec<'_> {
     }
 }
 
+/// Vault of a single owner who signs, writes and receives the key (the usual personal vault).
+pub fn own_vault<'a>(
+    owner: &'a Persona,
+    vk: &'a VaultKey,
+    vault_id: Uuid,
+    revision: u64,
+    items: Vec<(Uuid, u32, &'a str, &'a str)>,
+) -> Spec<'a> {
+    Spec {
+        vault_id,
+        owner_user_id: owner.id,
+        owner_signer: &owner.keys,
+        roster: Some((1, vec![entry(owner, VaultRole::Owner)])),
+        writer: (owner.id, &owner.keys),
+        grantor: (owner.id, &owner.keys),
+        recipient: (owner.id, &owner.keys),
+        vk,
+        key_version: 1,
+        revision,
+        items,
+    }
+}
+
 pub fn entry(p: &Persona, role: VaultRole) -> RosterMember {
     RosterMember {
         enc_pub: p.keys.enc_public_envelope(),

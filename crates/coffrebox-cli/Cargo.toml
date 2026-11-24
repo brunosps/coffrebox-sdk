@@ -1,0 +1,35 @@
+[package]
+name = "coffrebox-cli"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+authors = ["Bruno Santos"]
+license = "MIT"
+description = "Command-line client for Coffrebox, a zero-knowledge secrets vault: run any program with your vault's secrets in its environment."
+repository = "https://github.com/brunosps/coffrebox-sdk"
+homepage = "https://coffrebox.net/docs/en/cli"
+readme = "README.md"
+keywords = ["secrets", "vault", "zero-knowledge", "env", "cli"]
+categories = ["command-line-utilities", "cryptography", "config"]
+
+[[bin]]
+name = "coffre"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+coffrebox = { path = "../coffrebox-client", version = "0.1.0" }
+coffrebox-core = { path = "../coffrebox-core", version = "0.1.0" }
+keyring = { workspace = true }
+reqwest = { workspace = true }
+rpassword = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

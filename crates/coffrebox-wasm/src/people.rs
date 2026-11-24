@@ -1,5 +1,8 @@
 //! People surface (the Stimulus web vault).
 
+use std::fmt::Write as _;
+
+use coffrebox_core::app_token::AppCredentials;
 use coffrebox_core::encoding::{b64url_decode, b64url_encode, generate_password, random_uuid_v4};
 use coffrebox_core::item::{ItemPayload, decrypt_item, encrypt_item};
 use coffrebox_core::kdf::{KdfParams, Kek, derive_account_keys};
@@ -8,8 +11,9 @@ use coffrebox_core::keys::{
     verify_fingerprint_last4,
 };
 use coffrebox_core::manifest::{
-    ManifestItemEntry, MemberRoster, RosterMember, VaultManifest, VaultRole,
+    ManifestItemEntry, MemberRoster, RosterApp, RosterMember, VaultManifest, VaultRole,
 };
+use coffrebox_core::password_change::{self, PasswordChangeError};
 use coffrebox_core::password_policy::check_master_password;
 use coffrebox_core::snapshot::EncryptedSnapshot;
 use coffrebox_core::trust::{TrustStore, TrustedVault, verify_vault_for_user};
@@ -348,6 +352,13 @@ pub fn decrypt_user_snapshot(
             serde_json::json!(trusted.is_owner(session.user_id)),
         );
         obj.insert("roster".into(), serde_json::Value::Array(roster));
+        // Applications in the owner-signed list: only these receive the key in rotations.
+        let roster_apps: Vec<Uuid> = trusted
+            .roster
+            .as_ref()
+            .map(|r| r.apps.iter().map(|a| a.app_id).collect())
+            .unwrap_or_default();
+        obj.insert("roster_apps".into(), serde_json::json!(roster_apps));
         obj.insert(
             "trust_state".into(),
             serde_json::json!(store.seal(&keyset).map_err(map_err)?),
@@ -355,6 +366,19 @@ pub fn decrypt_user_snapshot(
     }
     serde_json::to_string(&out)
         .map_err(|_| WasmError::msg("[FORMAT] failed to serialize decrypted snapshot"))
+}
+
+/// Most items one mutation written in the browser may carry (the web `.env` import shows the same
+/// limit before encrypting anything).
+pub const MAX_ITEMS_PER_MUTATION: usize = 500;
+
+/// One item to write: `id` of an existing item to replace (its version goes up by one), or none
+/// for a new item.
+#[derive(Deserialize)]
+struct ItemUpsertWire {
+    #[serde(default)]
+    id: Option<String>,
+    payload: ItemPayload,
 }
 
 #[wasm_bindgen]
@@ -365,6 +389,44 @@ pub fn prepare_item_upsert(
     item_id_opt: Option<String>,
     item_payload_json: &str,
 ) -> Result<String, WasmError> {
+    let payload: ItemPayload = serde_json::from_str(item_payload_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid item payload"))?;
+    upsert_items(
+        session_json,
+        snapshot_json,
+        trust_state,
+        vec![ItemUpsertWire {
+            id: item_id_opt,
+            payload,
+        }],
+    )
+}
+
+/// Several items in one mutation (one revision of the vault): `[{"id": "<uuid>" | null,
+/// "payload": {...}}]`. Used by the web `.env` import, so either every item is written or none.
+#[wasm_bindgen]
+pub fn prepare_items_upsert(
+    session_json: &str,
+    snapshot_json: &str,
+    trust_state: &str,
+    items_json: &str,
+) -> Result<String, WasmError> {
+    let items: Vec<ItemUpsertWire> = serde_json::from_str(items_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid item list"))?;
+    upsert_items(session_json, snapshot_json, trust_state, items)
+}
+
+fn upsert_items(
+    session_json: &str,
+    snapshot_json: &str,
+    trust_state: &str,
+    items: Vec<ItemUpsertWire>,
+) -> Result<String, WasmError> {
+    if items.is_empty() || items.len() > MAX_ITEMS_PER_MUTATION {
+        return Err(WasmError::msg(format!(
+            "[FORMAT] a mutation carries from 1 to {MAX_ITEMS_PER_MUTATION} items"
+        )));
+    }
     let session: UnlockedWebSession = serde_json::from_str(session_json)
         .map_err(|_| WasmError::msg("[FORMAT] invalid session"))?;
     let keyset = session.to_keyset()?;
@@ -375,43 +437,56 @@ pub fn prepare_item_upsert(
     let vk = &trusted.vault_key;
     let dec = &trusted.snapshot;
     let old_manifest = VaultManifest::parse_canonical(&snapshot.manifest).map_err(map_err)?;
-    let payload: ItemPayload = serde_json::from_str(item_payload_json)
-        .map_err(|_| WasmError::msg("[FORMAT] invalid item payload"))?;
 
-    let (item_id, next_ver) = match item_id_opt {
-        Some(ref s) if !s.trim().is_empty() => {
-            let id = parse_uuid(s)?;
-            let prev = dec
-                .items
-                .iter()
-                .find(|i| i.id == id)
-                .map(|i| i.version)
-                .unwrap_or(0);
-            (id, prev + 1)
+    let mut written = std::collections::HashSet::new();
+    let mut upserts = Vec::with_capacity(items.len());
+    let mut new_entries = Vec::with_capacity(items.len());
+    for item in items {
+        let (item_id, next_ver) = match item.id {
+            Some(ref s) if !s.trim().is_empty() => {
+                let id = parse_uuid(s)?;
+                let prev = dec
+                    .items
+                    .iter()
+                    .find(|i| i.id == id)
+                    .map(|i| i.version)
+                    .unwrap_or(0);
+                (id, prev + 1)
+            }
+            _ => (random_uuid_v4().map_err(map_err)?, 1),
+        };
+        if !written.insert(item_id) {
+            return Err(WasmError::msg("[FORMAT] the same item appears twice"));
         }
-        _ => (random_uuid_v4().map_err(map_err)?, 1),
-    };
-
-    let (ct, sha) = encrypt_item(
-        vk,
-        snapshot.vault_id,
-        item_id,
-        next_ver,
-        dec.key_version,
-        &payload,
-    )
-    .map_err(map_err)?;
+        let (ct, sha) = encrypt_item(
+            vk,
+            snapshot.vault_id,
+            item_id,
+            next_ver,
+            dec.key_version,
+            &item.payload,
+        )
+        .map_err(map_err)?;
+        upserts.push(serde_json::json!({
+            "id": item_id,
+            "version": next_ver,
+            "key_version": dec.key_version,
+            "ciphertext": ct,
+            "sha256": sha,
+        }));
+        new_entries.push(ManifestItemEntry {
+            id: item_id,
+            sha256: sha,
+            version: next_ver,
+        });
+    }
 
     let mut entries: Vec<ManifestItemEntry> = old_manifest
         .items
         .into_iter()
-        .filter(|e| e.id != item_id)
+        .filter(|e| !written.contains(&e.id))
         .collect();
-    entries.push(ManifestItemEntry {
-        id: item_id,
-        sha256: sha.clone(),
-        version: next_ver,
-    });
+    entries.extend(new_entries);
 
     let next_manifest = VaultManifest::new(
         snapshot.vault_id,
@@ -427,13 +502,7 @@ pub fn prepare_item_upsert(
     serde_json::to_string(&serde_json::json!({
         "expected_revision": dec.revision,
         "encrypted_meta": null,
-        "upserts": [{
-            "id": item_id,
-            "version": next_ver,
-            "key_version": dec.key_version,
-            "ciphertext": ct,
-            "sha256": sha,
-        }],
+        "upserts": upserts,
         "deletes": [],
         "manifest": manifest_json,
         "manifest_sig": manifest_sig,
@@ -801,6 +870,58 @@ pub fn prepare_key_rotation(
     .map_err(|_| WasmError::msg("[FORMAT] failed to serialize rotation"))
 }
 
+/// Master password change (Conta e segurança). Derives the current `auth_key` (the
+/// re-authentication) and, from the new password with a fresh salt, `new_auth_key`, `new_kdf` and
+/// the same key pairs sealed under the new `kek`, checked by opening them again.
+///
+/// Returns the JSON body of `POST /api/v1/auth/password/change` without `totp_code`, which the page
+/// adds. Errors: `[SAME_PASSWORD]`, `[WEAK_PASSWORD] [codes...]` (same codes as
+/// `master_password_problems`), plus the usual tags.
+#[wasm_bindgen]
+pub fn prepare_password_change(
+    session_json: &str,
+    current_password: &str,
+    new_password: &str,
+    current_kdf_json: &str,
+    email: &str,
+    name: &str,
+) -> Result<String, WasmError> {
+    let session: UnlockedWebSession = serde_json::from_str(session_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid session"))?;
+    let keyset = session.to_keyset()?;
+    let current_kdf: KdfParams = serde_json::from_str(current_kdf_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid kdf"))?;
+
+    let material = password_change::prepare_password_change(
+        &keyset,
+        session.user_id,
+        current_password,
+        new_password,
+        &current_kdf,
+        email,
+        name,
+    )
+    .map_err(|e| match e {
+        PasswordChangeError::SameAsCurrent => {
+            WasmError::msg("[SAME_PASSWORD] the new master password is the same as the current one")
+        }
+        PasswordChangeError::Weak(problems) => {
+            WasmError::msg(format!("[WEAK_PASSWORD] {}", serde_json::json!(problems)))
+        }
+        PasswordChangeError::Core(core) => map_err(core),
+    })?;
+    let (auth_key, _kek) =
+        derive_account_keys(current_password, session.user_id, &current_kdf).map_err(map_err)?;
+
+    serde_json::to_string(&serde_json::json!({
+        "auth_key": auth_key.as_str(),
+        "new_auth_key": material.auth_key.as_str(),
+        "new_kdf": material.kdf,
+        "new_encrypted_keyset": material.encrypted_keyset,
+    }))
+    .map_err(|_| WasmError::msg("[FORMAT] failed to serialize password change"))
+}
+
 #[wasm_bindgen]
 pub fn compute_fingerprint_last4_match(fingerprint: &str, typed: &str) -> bool {
     verify_fingerprint_last4(fingerprint, typed)
@@ -810,4 +931,179 @@ pub fn compute_fingerprint_last4_match(fingerprint: &str, typed: &str) -> bool {
 pub fn generate_random_password(length: u32, symbols: bool) -> Result<String, WasmError> {
     let pw = generate_password(length as usize, symbols).map_err(map_err)?;
     Ok(pw.to_string())
+}
+
+/// Renames the vault: encrypts the new name with the current VK and signs a manifest with the
+/// new `vault_meta_sha256`, the same items and `revision + 1`. The server only accepts it from a
+/// member who can write, and the manifest signature is checked against the signed list as usual.
+#[wasm_bindgen]
+pub fn prepare_vault_rename(
+    session_json: &str,
+    snapshot_json: &str,
+    trust_state: &str,
+    new_name: &str,
+) -> Result<String, WasmError> {
+    let session: UnlockedWebSession = serde_json::from_str(session_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid session"))?;
+    let keyset = session.to_keyset()?;
+    let snapshot: EncryptedSnapshot = serde_json::from_str(snapshot_json)
+        .map_err(|_| WasmError::msg("[TAMPERED] invalid snapshot JSON"))?;
+    let name = new_name.trim();
+    if name.is_empty() || name.chars().count() > 120 {
+        return Err(WasmError::msg(
+            "[FORMAT] the vault name must have between 1 and 120 characters",
+        ));
+    }
+
+    let (trusted, _) = verify_with_trust_state(&session, &keyset, &snapshot, trust_state, None)?;
+    let dec = &trusted.snapshot;
+    let old_manifest = VaultManifest::parse_canonical(&snapshot.manifest).map_err(map_err)?;
+    let (encrypted_meta, meta_sha) = encrypt_vault_meta(
+        &trusted.vault_key,
+        snapshot.vault_id,
+        dec.key_version,
+        &VaultMeta::new(name),
+    )
+    .map_err(map_err)?;
+    let next_manifest = VaultManifest::new(
+        snapshot.vault_id,
+        dec.revision + 1,
+        dec.key_version,
+        session.user_id,
+        meta_sha,
+        old_manifest.items,
+    )
+    .map_err(map_err)?;
+    let (manifest_json, manifest_sig) = next_manifest.sign(&keyset).map_err(map_err)?;
+
+    serde_json::to_string(&serde_json::json!({
+        "expected_revision": dec.revision,
+        "encrypted_meta": encrypted_meta,
+        "upserts": [],
+        "deletes": [],
+        "manifest": manifest_json,
+        "manifest_sig": manifest_sig,
+    }))
+    .map_err(|_| WasmError::msg("[FORMAT] failed to serialize rename"))
+}
+
+/// Fingerprint of the unlocked account, computed from the local keyset (never from the server).
+///
+/// The last 4 characters are the "security code" an invited person reads to the vault owner.
+#[wasm_bindgen]
+pub fn session_fingerprint(session_json: &str) -> Result<String, WasmError> {
+    let session: UnlockedWebSession = serde_json::from_str(session_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid session"))?;
+    Ok(session.to_keyset()?.fingerprint())
+}
+
+/// Registers a new application access for a vault. Owner only.
+///
+/// Generates the application keys here, seals the current VK to it, adds it to the owner-signed
+/// list and builds the token with the owner key **verified** against the local anchor (never the
+/// one the server sent). Returns `{"request": {...}, "token": "cfb1_app_...", "app_id": "..."}`:
+/// `request` goes to `POST /vaults/{id}/apps`; the token is shown once and never sent anywhere.
+#[wasm_bindgen]
+pub fn prepare_app_grant(
+    session_json: &str,
+    snapshot_json: &str,
+    trust_state: &str,
+    app_name: &str,
+) -> Result<String, WasmError> {
+    let session: UnlockedWebSession = serde_json::from_str(session_json)
+        .map_err(|_| WasmError::msg("[FORMAT] invalid session"))?;
+    let keyset = session.to_keyset()?;
+    let snapshot: EncryptedSnapshot = serde_json::from_str(snapshot_json)
+        .map_err(|_| WasmError::msg("[TAMPERED] invalid snapshot"))?;
+    let name = app_name.trim();
+    if name.is_empty() || name.chars().count() > 128 {
+        return Err(WasmError::msg(
+            "[FORMAT] the access name must have between 1 and 128 characters",
+        ));
+    }
+
+    let (trusted, _) = verify_with_trust_state(&session, &keyset, &snapshot, trust_state, None)?;
+    if !trusted.is_owner(session.user_id) {
+        return Err(WasmError::msg(
+            "[FORBIDDEN] only the vault owner registers applications",
+        ));
+    }
+
+    let app_id = random_uuid_v4().map_err(map_err)?;
+    let creds = AppCredentials::generate(app_id, trusted.owner_sign_public_key).map_err(map_err)?;
+    let (sealed_vk, vk_sig) = seal_vault_key(
+        &trusted.vault_key,
+        &creds.enc_public_bytes(),
+        RecipientKind::App,
+        snapshot.vault_id,
+        app_id,
+        trusted.snapshot.key_version,
+        &keyset,
+    )
+    .map_err(map_err)?;
+    let roster = trusted
+        .roster_with_app(
+            session.user_id,
+            &keyset,
+            RosterApp {
+                app_id,
+                enc_pub: creds.enc_public_envelope(),
+                sign_pub: creds.sign_public_envelope(),
+            },
+        )
+        .map_err(map_err)?;
+    let (roster_json, roster_sig) = roster.sign(&keyset).map_err(map_err)?;
+    let token = creds.to_token();
+
+    serde_json::to_string(&serde_json::json!({
+        "app_id": app_id,
+        "token": token.as_str(),
+        "request": {
+            "app_id": app_id,
+            "name": name,
+            "enc_public_key": creds.enc_public_envelope(),
+            "sign_public_key": creds.sign_public_envelope(),
+            "sealed_vk": sealed_vk,
+            "vk_sig": vk_sig,
+            "key_version": trusted.snapshot.key_version,
+            "member_roster": roster_json,
+            "member_roster_sig": roster_sig,
+        },
+    }))
+    .map_err(|_| WasmError::msg("[FORMAT] failed to serialize application grant"))
+}
+
+/// QR code (error correction M) of an `otpauth://` enrollment URI, built here in the browser so
+/// the authenticator secret never goes to a third-party service.
+///
+/// Returns `{"size": n, "path": "..."}`: an SVG path of the dark modules in a `n x n` grid, with
+/// no quiet zone (the page adds the margin).
+#[wasm_bindgen]
+pub fn otpauth_qr_svg_path(uri: &str) -> Result<String, WasmError> {
+    use qrcodegen::{QrCode, QrCodeEcc};
+
+    if !uri.starts_with("otpauth://") || uri.len() > 1024 {
+        return Err(WasmError::msg("[FORMAT] not an otpauth URI"));
+    }
+    let qr = QrCode::encode_text(uri, QrCodeEcc::Medium)
+        .map_err(|_| WasmError::msg("[FORMAT] URI too long for a QR code"))?;
+    let size = qr.size();
+    let mut path = String::new();
+    for y in 0..size {
+        let mut x = 0;
+        while x < size {
+            if qr.get_module(x, y) {
+                let start = x;
+                while x < size && qr.get_module(x, y) {
+                    x += 1;
+                }
+                let run = x - start;
+                let _ = write!(path, "M{start} {y}h{run}v1h-{run}z");
+            } else {
+                x += 1;
+            }
+        }
+    }
+    serde_json::to_string(&serde_json::json!({ "size": size, "path": path }))
+        .map_err(|_| WasmError::msg("[FORMAT] failed to serialize QR code"))
 }

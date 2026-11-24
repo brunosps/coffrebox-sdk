@@ -18,6 +18,26 @@ pub const ED25519_PUB_PREFIX: &str = "cfb1.epk.";
 pub const ED25519_SIG_PREFIX: &str = "cfb1.sig.";
 pub const KEYSET_ENVELOPE_PREFIX: &str = "cfb1.keyset.";
 
+/// Binary length of a v1 keyset envelope: nonce (24) + canonical JSON
+/// `{"enc_sk":"<43>","sign_seed":"<43>","v":1}` (120) + Poly1305 tag (16).
+pub const KEYSET_ENVELOPE_WIRE_LEN: usize = 24 + 120 + 16;
+
+/// Checks what the server can check in an `encrypted_keyset` it cannot open: the prefix, a
+/// canonical base64url body and the exact length of a v1 envelope. A keyset that fails here could
+/// never be opened by the client again.
+pub fn check_keyset_envelope_shape(envelope: &str) -> Result<()> {
+    let raw = envelope
+        .strip_prefix(KEYSET_ENVELOPE_PREFIX)
+        .ok_or(CoreError::InvalidFormat("missing cfb1.keyset. prefix"))?;
+    let wire = b64url_decode(raw)?;
+    if wire.len() != KEYSET_ENVELOPE_WIRE_LEN || b64url_encode(&wire) != raw {
+        return Err(CoreError::InvalidFormat(
+            "keyset envelope has the wrong shape",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 struct KeysetPlaintext {
     enc_sk: String,

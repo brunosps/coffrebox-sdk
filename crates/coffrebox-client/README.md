@@ -4,6 +4,8 @@ Zero-knowledge secrets for Rust apps. Your program reads its
 [Coffrebox](https://github.com/brunosps/coffrebox-sdk) vault at startup; the server stores the
 secrets but can never read them.
 
+**Guide:** <https://coffrebox.net/docs/en/rust> (Portuguese: <https://coffrebox.net/docs/rust>).
+
 > **Beta (0.x).** This SDK has not had an external security audit yet, and the API and on-disk
 > formats may still change before 1.0. Pin the version you test with.
 

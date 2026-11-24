@@ -1,8 +1,10 @@
-# Coffrebox SDKs
+# Coffrebox SDKs and CLI
 
-Open-source part of [Coffrebox](https://github.com/brunosps/coffrebox-sdk), a zero-knowledge
-secrets vault: the server stores your secrets but can never read them. Applications read their
-vault with an access token; everything is verified and decrypted locally.
+Open-source part of [Coffrebox](https://coffrebox.net/docs/en), a zero-knowledge secrets vault:
+the server stores your secrets but can never read them. Applications read their vault with an
+access token; everything is verified and decrypted locally.
+
+**Integration guide:** <https://coffrebox.net/docs/en> (Portuguese: <https://coffrebox.net/docs>).
 
 > **Beta (0.x).** Not externally audited yet. The API and the on-disk formats may still change
 > before 1.0.
@@ -11,7 +13,8 @@ vault with an access token; everything is verified and decrypted locally.
 |---|---|---|
 | [`@brunosps00/coffrebox`](packages/sdk-ts) | npm | Node.js 20+ SDK: `await Coffrebox.load()` fills `process.env`. |
 | [`coffrebox`](crates/coffrebox-client) | crates.io | Rust SDK (async and blocking). |
-| [`coffrebox-core`](crates/coffrebox-core) | crates.io | Cryptography and formats shared by both SDKs. |
+| [`coffrebox-cli`](crates/coffrebox-cli) | crates.io, [releases](https://github.com/brunosps/coffrebox-sdk/releases) | The `coffre` CLI: `coffre run -- <command>` for any language, and vault management. |
+| [`coffrebox-core`](crates/coffrebox-core) | crates.io | Cryptography and formats shared by the SDKs and the CLI. |
 | [`coffrebox-wasm`](crates/coffrebox-wasm) | — | WebAssembly bindings bundled inside the npm package. |
 
 Both SDKs read and write the same encrypted cache format, verify the same signatures and refuse
@@ -31,10 +34,16 @@ const vault = await Coffrebox.load(); // COFFREBOX_URL + COFFREBOX_TOKEN
 let vault = coffrebox::blocking::load()?; // first thing in main
 ```
 
+```sh
+# Any language
+coffre run -- python app.py
+```
+
 ## Building from source
 
 ```sh
 cargo test --workspace
+cargo build --release -p coffrebox-cli   # target/release/coffre
 
 # npm package (needs wasm-pack)
 cd packages/sdk-ts

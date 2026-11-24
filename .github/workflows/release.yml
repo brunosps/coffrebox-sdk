@@ -1,0 +1,119 @@
+name: Release CLI
+
+# Manual only. Builds the `coffre` binaries from an existing tag and publishes them, with a
+# SHA256SUMS file and a signed build provenance attestation, in the GitHub release of that tag.
+# Linux binaries are static (musl), so they run on any distribution, Alpine included.
+#
+# Supply chain: every action is pinned to a full commit SHA and the Rust toolchain to a fixed
+# version; a release that already has assets is never overwritten (publish a new tag instead).
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.1.0"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: "1.98.1"
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    # Só a partir da main: o workflow que gera os binários é o revisado, não o de outro branch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, os: macos-14 }
+          - { target: x86_64-apple-darwin, os: macos-14 }
+          - { target: x86_64-pc-windows-msvc, os: windows-2022 }
+    env:
+      TAG: ${{ inputs.tag }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check the tag
+        shell: bash
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "tag must look like v1.2.3"; exit 1; }'
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - name: Install Rust ${{ env.RUST_TOOLCHAIN }}
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --target "$TARGET"
+          rustup default "$RUST_TOOLCHAIN"
+      - name: Install musl tools
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked -p coffrebox-cli --target "$TARGET"
+      - name: Package (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          name="coffre-${TAG#v}-$TARGET"
+          mkdir pacote
+          cp "target/$TARGET/release/coffre" LICENSE pacote/
+          cp crates/coffrebox-cli/README.md pacote/README.md
+          tar -C pacote -czf "$name.tar.gz" coffre LICENSE README.md
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "coffre-$($env:TAG.TrimStart('v'))-$env:TARGET"
+          New-Item -ItemType Directory pacote | Out-Null
+          Copy-Item "target/$env:TARGET/release/coffre.exe", LICENSE pacote/
+          Copy-Item crates/coffrebox-cli/README.md pacote/README.md
+          Compress-Archive -Path pacote/* -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ matrix.target }}
+          path: coffre-*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Refuse to overwrite a published version
+        run: |
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            assets=$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')
+            if [ "$assets" != "0" ]; then
+              echo "release $TAG already has $assets assets; publish a new tag instead"
+              exit 1
+            fi
+          fi
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum coffre-* > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/coffre-*
+      - name: Create the release and upload
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 ||
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+              --notes "coffre CLI $TAG. Check your download against SHA256SUMS, or run: gh attestation verify <file> -R $GITHUB_REPOSITORY. Guide: https://coffrebox.net/docs/en/cli"
+          gh release upload "$TAG" dist/* -R "$GITHUB_REPOSITORY"

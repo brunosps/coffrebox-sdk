@@ -17,7 +17,7 @@ default = ["app", "people"]
 # npm SDK surface: application token, challenge and snapshot.
 app = []
 # Web vault surface: account, vaults, items, members and rotation.
-people = []
+people = ["dep:qrcodegen"]
 
 [dependencies]
 coffrebox-core = { path = "../coffrebox-core", version = "0.1.0" }
@@ -26,6 +26,8 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 wasm-bindgen = { workspace = true }
 zeroize = { workspace = true }
+# QR code of the authenticator enrollment URI, drawn in the browser (people surface only).
+qrcodegen = { version = "1.8", optional = true }
 
 [[test]]
 name = "trust_anchor"
@@ -37,4 +39,8 @@ required-features = ["people"]
 
 [[test]]
 name = "members_and_rotation"
+required-features = ["people"]
+
+[[test]]
+name = "web_vault_extras"
 required-features = ["people"]

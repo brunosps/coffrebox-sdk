@@ -20,18 +20,14 @@ fn web_attack_old_revision_is_refused() {
     let vk = VaultKey::generate().unwrap();
     let vault_id = random_uuid_v4().unwrap();
     let item = random_uuid_v4().unwrap();
-    let spec = |revision: u64, version: u32, value: &'static str| Spec {
-        vault_id,
-        owner_user_id: owner.id,
-        owner_signer: &owner.keys,
-        roster: Some((1, vec![entry(&owner, VaultRole::Owner)])),
-        writer: (owner.id, &owner.keys),
-        grantor: (owner.id, &owner.keys),
-        recipient: (owner.id, &owner.keys),
-        vk: &vk,
-        key_version: 1,
-        revision,
-        items: vec![(item, version, "PASSWORD", value)],
+    let spec = |revision: u64, version: u32, value: &'static str| {
+        own_vault(
+            &owner,
+            &vk,
+            vault_id,
+            revision,
+            vec![(item, version, "PASSWORD", value)],
+        )
     };
 
     let current =

@@ -251,8 +251,9 @@ The suggestion shown is a phrase of four random words.
 - **Activation:** `totp/setup` stores the new secret as pending; `totp/enable` checks a code from
   it and only then makes it the active secret. For someone holding the restricted token, activation
   revokes that token and returns the full session with the keyset.
-- **Re-authentication for sensitive actions:** changing devices, generating recovery codes and
-  rotating the account secret do not accept just the open session (which may have been stolen).
+- **Re-authentication for sensitive actions:** changing devices, generating recovery codes,
+  rotating the account secret and changing the master password (§4.6) do not accept just the open
+  session (which may have been stolen).
   Each one asks for the `auth_key` again, checked against the verifier as at sign-in, and a fresh
   second factor: an authenticator code from a step later than the last accepted one (the step is
   then spent) or, only when changing devices, a recovery code (also spent). Limits: 20 attempts
@@ -274,6 +275,42 @@ The suggestion shown is a phrase of four random words.
   on the web) removes the authenticator and the codes, ends every session, records
   `user.totp.admin_reset` and sends an e-mail notice. The master password is still required and
   the vaults do not change: the second factor controls access to the server, not the encryption.
+
+### 4.6 Changing the master password
+
+The person's key pairs **do not change**: `user_id`, public keys, fingerprint and vault access stay
+the same. Only what derives from the password changes: the verifier, the Argon2id parameters and
+the keyset envelope.
+
+- **In the client** (`coffrebox_core::password_change::prepare_password_change`, used by the CLI
+  and, through the WASM `prepare_password_change`, by the web vault):
+  1. refuses a new password equal to the current one (after NFKC) or one that fails the policy in
+     §4.4;
+  2. generates new Argon2id parameters with a **fresh salt** (16 random bytes, never the current
+     one);
+  3. derives `new_auth_key` and the new `kek` (§4.2) and seals the same keyset again (§4.3);
+  4. before sending, opens the new envelope with the new `kek` and checks that it gives back
+     exactly the same keys. A broken envelope would lock the account for good.
+- **Request:** `POST /api/v1/auth/password/change` with a full session, the re-authentication of
+  §4.5 (the current password's `auth_key` and a fresh `totp_code`; a recovery code is not
+  accepted) and `new_auth_key`, `new_kdf`, `new_encrypted_keyset`.
+- **On the server:**
+  - before the re-authentication (so a format error does not spend the authenticator code), it
+    checks `new_auth_key` (32 bytes), `new_kdf` (the same floors and ceilings as §4.2) and
+    `new_encrypted_keyset` (prefix, canonical base64url and the exact length of a v1 envelope, 160
+    bytes);
+  - then, in one transaction with the account row locked: refuses a salt equal to the current one,
+    rebuilds the verifier
+    `Argon2id(b64url(HMAC-SHA256(account_secret, "coffrebox/v1/password-verifier" || new_auth_key_wire)))`,
+    wraps the new keyset with `K_wrap` (§4.1) and stores the new parameters. It only writes if the
+    verifier and the account secret checked during re-authentication are still the current ones;
+    otherwise `409`. The account secret does not change;
+  - ends the account's other sessions (API and CLI tokens, web sessions); the one that asked for
+    the change stays. Records `user.password.change` and sends an e-mail notice.
+- **Limit:** the change does not undo a leak. Since the private keys are the same, whoever already
+  signed in with the old password (or holds an old database backup together with the server key
+  and the old password) still has them. The change protects from now on; against leaked private
+  keys, the way out is a new account and rotating the vaults' VK (§5.5).
 
 ---
 
@@ -449,7 +486,7 @@ performs, atomically:
 
 Only the owner performs the rotation, since it always produces a new signed roster.
 
-### 5.6 Trust anchor of the person-facing clients (CLI and web vault)
+### 5.6 Trust anchor of the person-facing clients (CLI, web vault and browser extension)
 
 The snapshot delivered by the server includes `owner_user_id` and `owner_sign_public_key`. These
 fields are **not** an anchor: a compromised server can swap them together with the
@@ -482,10 +519,92 @@ used to verify the snapshot always comes from the client
   `HKDF-SHA256(salt = user_id, ikm = sign_seed || enc_sk, info = "coffrebox/v1/local-trust-state")`
   and AAD `"coffrebox/v1/local-trust-state" || user_id`). If the browser clears that storage, the
   next access is a first use again.
+- **Browser extension:** `storage.local["cfb_trust_<user_id>"]` holds the same encrypted
+  `TrustStore` (`cfb1.trust.`), produced by the same WASM. The extension does not offer the
+  4-character confirmation: a vault whose owner key changed (`[OWNER_CHANGED]`), that was rolled
+  back (`[ROLLBACK]`) or that does not verify is neither shown nor used, and the popup asks the
+  person to check it in the web vault. Removing the extension deletes the state (the next access
+  is a first use again).
 
 **Known limit:** on a new device (or with the state cleared), the first access to a shared vault
 trusts whatever the server presents. That is why the first use shows the owner's fingerprint,
 which must be checked outside the system.
+
+### 5.7 Browser extension: session, autofill and saved logins
+
+The extension (Chrome and Firefox, Manifest V3) is a person-facing client like the CLI. The WASM
+(`coffrebox-wasm`, the same functions as the web vault) and the JavaScript ship inside the
+package; the extension pages' CSP is `script-src 'self' 'wasm-unsafe-eval'; object-src 'none'`
+and nothing is downloaded from the server. The "compromised server tampers with the web vault's
+JavaScript" limit (§2.2) therefore does not apply to it; instead, whoever can change the files of
+the installed folder controls the extension (installation is manual, with no store).
+
+1. **Sign-in:** the CLI flow. `POST /auth/prelogin` → `auth_key` and `kek` derived in WASM (with
+   the anti-downgrade floor of §4.2) → `POST /auth/login` with `totp_code` or `recovery_code` and
+   `web_session: false` → `cfb1_ust_` Bearer token and keyset, opened in WASM. Requests leave the
+   background page with `credentials: "omit"` (no cookies) and `redirect: "error"` (the token never
+   follows to another origin), only to the chosen server origin: the default,
+   `https://coffrebox.net`, already allowed in the manifest (`host_permissions`), or another one the
+   person typed and authorized (`optional_host_permissions`).
+2. **Where the secrets live:** the X25519 private key, the Ed25519 seed and the token stay in the
+   background page's memory. So that Chrome can stop the idle service worker without locking the
+   vault, a copy goes to `storage.session` encrypted with AES-256-GCM (random 12-byte IV, AAD
+   `"coffrebox/extensao/sessao/" || name`) under a WebCrypto key created with
+   `extractable: false` and kept in the extension's IndexedDB. The key id lives in
+   `storage.session` itself; each browser session creates a new key and deletes the previous one.
+
+   | Where | What |
+   |---|---|
+   | background page memory | opened keyset, token, decrypted snapshots |
+   | `storage.session` (browser memory; gone when the browser closes) | key id, encrypted session, encrypted pending sign-in (`auth_key` + `kek` between password and code, up to 5 min), encrypted pending saves (logins submitted on sites awaiting a decision, up to 5 min), tab ids with a pending save (plaintext ids only) |
+   | extension IndexedDB (disk) | the non-extractable AES-GCM key |
+   | `storage.local` (disk) | server address, last e-mail used, `cfb_trust_<user_id>` (`cfb1.trust.`) |
+
+   Nothing reaches the disk in plaintext: `storage.session` is not written to disk and the
+   IndexedDB key alone opens nothing. Reading the browser's memory while the vault is open is the
+   "compromised device while unlocked" case (§2.2).
+3. **Locking:** closing the browser (`storage.session` is gone) or the popup's lock button.
+   Locking clears memory, `storage.session` and the IndexedDB key and revokes the token
+   (`POST /auth/logout`). An expired or revoked token (`401`) also locks. By the project owner's
+   decision there is no inactivity lock.
+4. **Autofill:** only after a click in the popup (`activeTab` + `scripting`), only in the top
+   frame (`frameIds: [0]`, never iframes) and only when the tab address, read from the browser
+   API, belongs to the item's site: same registrable domain per the Public Suffix List (including
+   its private section, so `alice.github.io` and `bob.github.io` are different sites), same port
+   when either side has an explicit one, https (http only on `localhost`/`127.0.0.1`) and no
+   downgrade from an https item to an http tab. The injected function checks `location.origin`
+   again before writing and never submits the form. The in-field shortcut (7) follows the same
+   rules, with the click on a row of its card instead of the click in the popup.
+5. **Saving a login:** a content script (isolated world, top frame, https and local http only)
+   notices the submission of a form with a password and sends `{username, password}` to the
+   background page, which takes the origin and tab from the sender reported by the browser.
+   Submissions on the server origin and on the web vault screens never become a save request (the
+   master password is never offered for saving). The request lasts up to 5 minutes, encrypted as
+   in (2), even while the vault is locked; the tab gets a "1" badge and the popup asks. Saving or
+   updating the password uses `prepare_item_upsert` (the same signed mutation as the web vault's
+   item form), only in people vaults where the role in the signed roster allows writing.
+6. **Clipboard:** the popup copies and, 30 s later, the extension replaces the content with an
+   empty string: in Chrome through an `offscreen` document (reason `CLIPBOARD`), in Firefox through
+   the background page itself.
+7. **In-field shortcut:** the content script of (5) also draws a discreet mark on the username or
+   password field that a click would fill (closed shadow root, styling only through CSSOM), and
+   only while the vault is unlocked and some vault has a login for the site. The background page
+   decides, from the address the browser reported for the top frame (`sender.url`), never from
+   what the page says, and the answer is only "show or not". A click on the mark (`isTrusted`
+   events only) asks for a single-use code (128 random bits, one per tab, 10 minutes, kept only
+   in the background page's memory) and opens the card: `atalho.html`, the only file in
+   `web_accessible_resources`, in a frame of the extension's origin that the page cannot read.
+   The frame asks for the list with the code; the background page checks code and tab and returns
+   only the logins that would pass the rules of (4) for that address. A click on a row, or
+   ↑ ↓ Enter from `isTrusted` keys (relayed by the background page through a port the frame opens
+   with the code), asks for the fill: the background page checks the rules of (4) again and sends
+   username and password through `tabs.sendMessage` only to the document that opened the card
+   (`documentId` in Chrome, top frame in Firefox), which checks the code and `location.origin`
+   before writing and never submits the form. The master password and the authenticator code are
+   never asked for inside the page. Limits: the page can tell the mark exists (it learns the
+   person uses Coffrebox and has a login saved for that site) and, as with any manager that fills
+   from the page, a script of the page itself (XSS) that lures a click on a row receives that
+   site's logins.
 
 ---
 

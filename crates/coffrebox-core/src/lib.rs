@@ -17,6 +17,7 @@ pub mod item;
 pub mod kdf;
 pub mod keys;
 pub mod manifest;
+pub mod password_change;
 pub mod password_policy;
 pub mod snapshot;
 pub mod trust;

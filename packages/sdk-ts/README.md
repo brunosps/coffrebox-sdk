@@ -3,6 +3,8 @@
 Zero-knowledge secrets for Node.js apps. Your app loads its [Coffrebox](https://github.com/brunosps/coffrebox-sdk)
 vault into `process.env` at startup; the server stores the secrets but can never read them.
 
+**Guide:** <https://coffrebox.net/docs/en/node> (Portuguese: <https://coffrebox.net/docs/node>).
+
 > **Beta (0.x).** This SDK has not had an external security audit yet, and the API and on-disk
 > formats may still change before 1.0. Pin the version you test with.
 
