@@ -19,6 +19,20 @@ vault into `process.env` at startup; the server stores the secrets but can never
 
 ## Install
 
+> **Not on npm yet.** The package will be published soon. Until then, build it from this
+> repository (needs Rust with the `wasm32-unknown-unknown` target and `wasm-pack`), or run your app
+> with the [`coffre` CLI](https://coffrebox.net/docs/en/cli) (`coffre run -- node server.js`).
+>
+> ```sh
+> git clone --branch v0.1.0 https://github.com/brunosps/coffrebox-sdk
+> cd coffrebox-sdk/packages/sdk-ts
+> npm ci && npm run build:wasm && npm run build && npm pack
+> # in your project:
+> npm install /path/to/coffrebox-sdk/packages/sdk-ts/brunosps00-coffrebox-0.1.0.tgz
+> ```
+
+Once it is published:
+
 ```sh
 npm install @brunosps00/coffrebox
 ```

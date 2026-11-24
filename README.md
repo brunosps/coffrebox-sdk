@@ -11,7 +11,7 @@ access token; everything is verified and decrypted locally.
 
 | Package | Where | What |
 |---|---|---|
-| [`@brunosps00/coffrebox`](packages/sdk-ts) | npm | Node.js 20+ SDK: `await Coffrebox.load()` fills `process.env`. |
+| [`@brunosps00/coffrebox`](packages/sdk-ts) | npm (coming soon; [build it from here](packages/sdk-ts#install) for now) | Node.js 20+ SDK: `await Coffrebox.load()` fills `process.env`. |
 | [`coffrebox`](crates/coffrebox-client) | crates.io | Rust SDK (async and blocking). |
 | [`coffrebox-cli`](crates/coffrebox-cli) | crates.io, [releases](https://github.com/brunosps/coffrebox-sdk/releases) | The `coffre` CLI: `coffre run -- <command>` for any language, and vault management. |
 | [`coffrebox-core`](crates/coffrebox-core) | crates.io | Cryptography and formats shared by the SDKs and the CLI. |
